@@ -23,18 +23,21 @@ facts with strategic narrative. The monthly is the low-effort, recent-progress c
 ## 2. Architecture
 
 ```
-  ┌─────────────────────────┐     (5th of month, cron)
-  │  Claude routine (cloud)  │◀──────────────────────────────┐
-  │  - clones doc-site       │                                │
-  │  - invokes monthly skill │   gh/git over all repos        │  /schedule
-  │  - writes monthly/*.md   │──────────────▶ GitHub API      │  (user-owned)
-  │  - opens PR (claude/*)   │                                │
-  └───────────┬─────────────┘                                 │
-              │ PR to doc-site                                 │
-              ▼                                                │
-  ┌─────────────────────────┐  human reviews / edits / merges │
-  │  Pull request            │────────────────────────────────┘
-  └───────────┬─────────────┘
+  ┌──────────────────────────────┐     (5th of month, cron)
+  │  Claude routine (cloud)       │◀───────────────────────────┐
+  │  - clones doc-site (App auth) │                             │
+  │  - reads all repos via gh     │   gh api (bot GH_TOKEN)     │  /schedule
+  │    (bot GH_TOKEN, 5k req/hr)  │──────────────▶ GitHub API   │  (user-owned)
+  │  - builds monthly/<YYYY-MM>.md│                             │
+  │  - commits file via Contents  │   bot-authored + Verified   │
+  │    API to BOT fork (bot tok)  │──────────────▶ bot fork     │
+  │  - gh pr create → upstream    │                             │
+  └───────────┬──────────────────┘                             │
+              │ PR (bot fork → go-openapi/doc-site)             │
+              ▼                                                 │
+  ┌─────────────────────────┐  human reviews / edits / squash- │
+  │  Pull request           │  merges (final master commit     │
+  └───────────┬─────────────┘  authored + signed at merge) ────┘
               │ merge to master → "Update documentation" workflow builds + deploys Pages
               ▼
   ┌─────────────────────────┐
@@ -61,8 +64,15 @@ Reference: <https://code.claude.com/docs/en/routines.md>, <https://code.claude.c
   script (`apt-get update && apt-get install -y gh`) and provide a `GH_TOKEN` env var. Network defaults to
   "Trusted" (GitHub + package registries allowed) — enough to clone public repos and use the GitHub API.
 - **Autonomous PR:** routines can push a branch and `gh pr create` **with no approval gate**. Default push is
-  restricted to `claude/*` branches (can be lifted per repo). PR is attributed to the connected GitHub
-  identity (GitHub App install, or a token synced with `/web-setup`).
+  restricted to `claude/*` branches (can be lifted per repo).
+- **Git-identity caveat (verified against the docs):** `git push` from the sandbox flows through a GitHub
+  **proxy** and is attributed to the *connected* identity (the Claude App / `/web-setup` token). A `GH_TOKEN`
+  env var is used by the **`gh` CLI only — not by `git push`** — and a token-in-remote-URL is overridden by
+  the proxy. In-sandbox GPG signing keys are also unavailable. **Consequence:** to attribute commits to a
+  dedicated **bot** identity *and* get GitHub-Verified signing, do **not** `git push` the report — create the
+  commit through the **GitHub Contents API** with the bot's token (`gh api --method PUT …/contents/…`).
+  API-created commits are authored by the token owner (the bot) and auto-signed by GitHub (Verified). The
+  connected App/`/web-setup` auth is still required for the routine to clone and operate. See §4.3.
 - **Monitoring:** runs appear at `claude.ai/code/routines` as full sessions (transcript + diff). **No built-in
   notifications** — the opened PR is the signal. "Green" means it started, not that it succeeded.
 - **Ownership / limits:** the routine is created and owned by a human via `/schedule` (web/CLI) — Claude cannot
@@ -83,8 +93,8 @@ Fork of `quarterly-newsletter` with these deltas:
   `.../releases`, `.../pulls`, `.../issues`) over local clones, since the routine starts with only doc-site
   checked out. Shallow-clone (`--depth`/`--shallow-since`) only if a repo needs file-level inspection.
   **Reads must be authenticated** — unauthenticated GitHub API is 60 req/hour, far too low for sweeping ~18
-  repos; authenticated is 5,000 req/hour. Use the GitHub App's built-in GitHub tools (no stored token) or a
-  `GH_TOKEN` for the `gh` CLI (see §4.3 / decision D3).
+  repos; authenticated is 5,000 req/hour. Use the **bot's `GH_TOKEN`** with the `gh` CLI/API (same identity
+  that authors the report commit; see §4.3 / D3).
 - **Front matter:** same dual-field convention as quarterly — plain `description` for Hugo cards, rich
   `discord_description` for the announcement.
 - **No human-in-the-loop assumptions:** the skill must run unattended end-to-end (no questions), unlike the
@@ -99,21 +109,28 @@ Fork of `quarterly-newsletter` with these deltas:
 
 ### 4.3 The routine
 
-- **Repo:** `go-openapi/doc-site` (so it gets the skill + writes to the blog + targets the right PR).
+- **Repo:** `go-openapi/doc-site` (so it gets the skill + targets the right upstream PR base).
 - **Schedule:** `0 9 5 * *` (adjust local time).
+- **Identity model (see D3):** a dedicated **bot user** (a distinct GitHub account that is an "emanation of
+  fredbi") owns a **public fork** of doc-site. The routine writes the report and commits it **to the bot's
+  fork via the GitHub Contents API using the bot's `GH_TOKEN`** — *not* `git push` (which the proxy would
+  attribute to the connected App identity). API commits are bot-authored and GitHub-**Verified**. It then
+  opens a cross-fork PR with `gh`. The bot needs **no org membership**.
 - **Environment:**
   - Network: Trusted.
-  - Auth: the **Claude GitHub App** (already installed) for clone/push/PR and authenticated reads via its
-    built-in GitHub tools. Add a `GH_TOKEN` env var **only** if we keep the skill's `gh` CLI calls (it needs
-    one); otherwise adapt the skill to the built-in GitHub tools and store no token (preferred).
-  - Setup script: install `gh` (only if the CLI path is used).
-  - Branch pushes: keep the default `claude/*` restriction (PR from `claude/monthly-YYYY-MM`).
+  - Connected auth: the **Claude GitHub App** (already installed) — required so the routine can clone/operate.
+  - `GH_TOKEN`: a **fine-grained PAT owned by the bot** (contents + pull-requests write on the bot's fork;
+    pull-requests write on upstream to open the PR; read on the org for cross-repo data). Drives all `gh`
+    reads, the Contents-API commit, and `gh pr create`.
+  - Setup script: install `gh` (`apt-get update && apt-get install -y gh`).
 - **Prompt (outline):**
-  1. Invoke the `monthly-newsletter` skill for the previous calendar month.
-  2. Write `docs/doc-site/blog/monthly/<YYYY>-<MM>.md`.
-  3. Commit on `claude/monthly-<YYYY>-<MM>`, push, open a PR to `master` titled
-     "doc(blog): monthly report — <Month YYYY>".
-  4. Do **not** post to Discord (that happens on merge, via the workflow).
+  1. Invoke the `monthly-newsletter` skill for the previous calendar month (reads via the bot `GH_TOKEN`).
+  2. Build `docs/doc-site/blog/monthly/<YYYY>-<MM>.md` locally.
+  3. Create branch `claude/monthly-<YYYY>-<MM>` on the bot's fork and commit the file via
+     `gh api --method PUT repos/<bot>/doc-site/contents/…` (bot-authored, Verified).
+  4. `gh pr create --repo go-openapi/doc-site --head <bot>:claude/monthly-<YYYY>-<MM> --base master`
+     titled "doc(blog): monthly report — <Month YYYY>".
+  5. Do **not** post to Discord (that happens on merge, via the workflow).
 
 ### 4.4 `announce-monthly.yml`
 
@@ -130,36 +147,52 @@ Copy of `announce-quarterly.yml` with:
 **Resolved (2026-05-30):**
 
 - **D1 — DCO / human-author rule: NOT a violation.** The agent (Claude, in the cloud) produces the content,
-  but the work is **sponsored and validated by the maintainer**, exactly like the commits we already make
-  together: `author: fredbi`, `Co-Authored-By: Claude` (read: human-sponsor = fred, content-producer =
-  Claude). Analogy: a contractor writing code for a client — the client owns and authors it even though
-  Claude's "fingers play the music." Mechanics: routine commits on `claude/monthly-*` are authored by the
-  connected GitHub identity (fredbi) with the Claude co-author trailer; the maintainer **squash-merges** so
-  master carries fredbi's authorship + DCO sign-off. No rule change needed.
-- **D3 — Auth: use the installed Claude GitHub App.** Reasoning: auth is needed both to **open the PR** (push
-  + create) and, importantly, to make **authenticated reads** across ~18 repos — unauthenticated GitHub API
-  is capped at 60 req/hour, authenticated at 5,000. The App provides push/PR + built-in authenticated GitHub
-  read tools with no stored token. A `GH_TOKEN` is added only if we retain the skill's `gh` CLI calls.
+  but the work is **sponsored and validated by the maintainer**. Analogy fredbi uses: a contractor coding for
+  a client — the client owns and authors it even though Claude's "fingers play the music." The dedicated bot
+  identity (D3) is the on-the-record stand-in for that sponsored authorship (its profile states it is an
+  emanation of fredbi), exactly like `go-openapi-bot` already authors the automated `contributors.md` updates.
+  The maintainer **squash-merges** the PR, so the final master commit is authored + signed at merge time.
+- **D3 — Identity: a dedicated bot user + public fork (NOT the personal account or the Claude App identity).**
+  Verified mechanics that drive this:
+  - `git push` in a routine flows through a GitHub proxy and is attributed to the *connected* identity (Claude
+    App / `/web-setup` token); a `GH_TOKEN` is used by the `gh` CLI **only**, and token-in-URL is overridden.
+    In-sandbox signing keys are unavailable.
+  - **Therefore** the report commit is created via the **GitHub Contents API** with the **bot's `GH_TOKEN`**
+    (not `git push`): the commit is **bot-authored and GitHub-Verified**, on a `claude/*` branch of the bot's
+    **public fork**, and the PR is opened cross-fork with `gh`. This needs **no org membership** and recovers
+    signed/verified commits without keys in the sandbox.
+  - The Claude GitHub App stays installed (required for the routine to clone/operate); the separate
+    identity-switching App used for `go-openapi-bot` in CI workflows is **not needed** here (we're only
+    opening a PR, and the bot PAT carries the identity).
+  - Authenticated reads across ~18 repos also use the bot `GH_TOKEN` (60 → 5,000 req/hour).
 - **D4 — Quiet months / quarter overlap: always publish, note the overlap.** Publish every month regardless
   of volume. In quarter-end months, keep the monthly factual and let the quarterly carry the strategy; a one
   line note can point readers to the quarterly.
+- **D7 — Squash-merge author: the bot.** The bot authors the master commit (its signature names fredbi),
+  consistent with how `go-openapi-bot` already authors automated commits. There is no goal of maximizing
+  fredbi's personal commit count, so bot authorship is fine.
 
 **Still open (low stakes, have recommendations):**
 
-- **D2 — PR target.** Recommend upstream `go-openapi/doc-site:master`, maintainer merges.
+- **D2 — PR target.** Upstream `go-openapi/doc-site:master` (cross-fork from the bot), maintainer merges.
 - **D5 — `weight` scheme for monthly** (see §4.2): descending by `YYYYMM`.
 - **D6 — Failure handling.** No auto-retry; maintainer clicks "Run now" if the 5th's run fails. Acceptable
   for a monthly cadence.
+- **D8 — Verify in dry-run.** The Contents-API-as-bot + cross-fork-PR flow rests on documented behavior plus
+  a couple of flagged uncertainties (proxy not touching API commits; cross-fork PR from a routine). Confirm
+  on the first "Run now" before trusting the schedule.
 
 ## 6. Setup checklist (human-owned steps)
 
 1. Land the `monthly-newsletter` skill + `announce-monthly.yml` on `master` (normal PR).
 2. Create the `#monthly-news` Discord channel + webhook; add `DISCORD_MONTHLY_WEBHOOK_URL` repo secret.
-3. Confirm the Claude GitHub App is installed on `doc-site` (and granted org read for cross-repo data). Add a
-   `GH_TOKEN` env var only if the skill keeps its `gh` CLI calls.
+3. **Create/confirm the bot identity:** a dedicated GitHub user (profile: "emanation of fredbi"), give it a
+   **public fork** of `doc-site`, and mint a **fine-grained PAT** (contents + PRs write on the fork, PRs write
+   on upstream, org read). Confirm the Claude GitHub App is installed on `doc-site`.
 4. Create the routine via `/schedule` (or claude.ai/code/routines) against `go-openapi/doc-site`, with the
-   schedule, env (network=Trusted, `gh` install, `GH_TOKEN`), and prompt from §4.3.
-5. **Dry run:** use "Run now" once; verify the PR, the rendered page, and (after merge) the Discord post.
+   schedule, env (network=Trusted, `gh` install, bot `GH_TOKEN`), and prompt from §4.3.
+5. **Dry run (covers D8):** use "Run now" once; verify the commit is bot-authored + Verified on the fork, the
+   cross-fork PR opened, the rendered page, and (after merge) the Discord post.
 
 ## 7. Risks & constraints
 
@@ -170,8 +203,9 @@ Copy of `announce-quarterly.yml` with:
 - **Secret handling** — routine env vars are team-visible; use a least-privilege, rotatable token.
 - **Cost** — counts against subscription usage + daily routine cap; one run/month is negligible.
 
-## 8. Out of scope (for now)
+## 8. Out of scope
 
-- Weekly reports (the `#weekly-news` channel exists but is not in this plan).
+- **Weekly reports — dropped, permanently.** The Discord server is already fed noisily by PR / issue / release
+  events, so a weekly digest would be ignored by most members. Monthly + quarterly is the right cadence.
 - A shared/reusable routine across orgs — this is doc-site-specific.
 - Auto-merge of the monthly PR — explicitly human-gated.
