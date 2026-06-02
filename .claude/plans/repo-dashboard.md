@@ -218,13 +218,18 @@ Activity carries per-org **Subtotal** rows and a grand **Total** row. All extern
 From the richer `sample-dashboard.md`, **still not** built (round 2 pulled the Activity metrics and a Github
 tab forward — see §2):
 - **Tabs:** **Go** (go version, godoc, mono-repo, top languages), **Security** (policy, Dependabot, open
-  vulnerabilities — see D-h), **Shipping** (Docker/package repos, go-swagger-specific).
+  vulnerabilities — *open-vulnerability count delivered 2026-06-02 as two Github-tab columns, see
+  `dashboard-security.md` / D-h; a dedicated Security tab is still deferred*), **Shipping** (Docker/package
+  repos, go-swagger-specific).
 - **Github tab extras:** **protected-master** and **required-checks** status (need the branch-protection API).
-- **Fork-aware metrics for `testify`** — as a fork it is included via the fork allow-list, but its **Total
-  commits**, **Total contributors** and **commit windows** reflect the upstream lineage (GitHub counts the
-  whole fork network). A future improvement would count only commits since the fork point (or since
-  go-openapi adoption) so the numbers reflect our own work; until then `testify`'s churn/contributor figures
-  read high.
+- **Fork-aware metrics for `testify`** — ✅ **DONE (2026-06-02, branch `feat/dashboard-sec`).** As a fork it
+  is included via the allow-list, but GitHub reported the whole fork network for **Total commits** and **Total
+  contributors** (~1483 / 258 vs our own ~227 / 6). The generator now counts only the fork's own commits since
+  the fork point via the cross-fork compare API (`parent_default...fork_default`), overriding `totalCommits`
+  and the contributor list (so the per-org / overall *distinct* totals de-inflate too). The **commit windows**
+  needed no change after all: testify's history holds only shared ancestry (dated before the fork point) plus
+  our own commits, so the `since=` date filters already exclude upstream. Needs the discovery query's new
+  `parent { nameWithOwner defaultBranchRef }` field.
 - **Auto-detected workflow paths** — the overrides table (§4.2) is maintained by hand; auto-detection would
   remove the need to edit the script when a repo diverges. Low priority.
 
@@ -241,10 +246,13 @@ tab forward — see §2):
 - **D-f** — exact columns per tab → **RESOLVED for v1** (columns implemented in §4.4); phase-2 tabs revisit.
 - **D-g** — render data-driven tables inside `tabs` via a custom partial → **RESOLVED**: a custom `dashboard`
   shortcode feeds the theme's `shortcodes/tabs.html` partial; verified against a real Hugo build (§9).
-- **D-h** — **include an open-vulnerability count? (undecided).** The only metric needing elevated read scope:
-  Dependabot/code-scanning alerts require `security-events: read` across all repos (a bot PAT with
-  `security_events` / fine-grained "Dependabot alerts: read", or a GitHub App). If included, the scope stays
-  confined to the `collect-dashboard` job; everything else needs only public-metadata read.
+- **D-h** — include an open-vulnerability count? → **RESOLVED (2026-06-02): yes** — see
+  `dashboard-security.md`. Two Github-tab columns: **Security alerts** (combined open count across code
+  scanning / Dependabot / secret scanning) and **Security reports** (open repository advisories). The elevated
+  read is confined to a separate **`SECURITY_TOKEN`** used only by those four calls — a **go-openapi-bot App
+  installation token** (installed on both orgs; reads code scanning / Dependabot / secret scanning alerts +
+  repository security advisories), not the job's `GITHUB_TOKEN` (which is doc-site-scoped and cannot read other
+  repos' security data). A flavor we cannot read is flagged `⚠️`, distinct from a clean `0`.
 
 ## 6. Setup checklist
 
